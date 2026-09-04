@@ -1,0 +1,46 @@
+name: TennisExplorer Historical Odds Probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/tennisexplorer_probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe public Challenger odds pages
+        run: |
+          python - <<'PY'
+          import json, urllib.request, re
+          from pathlib import Path
+          urls=[
+            'https://www.tennisexplorer.com/cap-cana-challenger/2026/atp-men/',
+            'https://www.tennisexplorer.com/tyler-challenger/2026/atp-men/',
+            'https://www.tennisexplorer.com/results/?type=atp-single&year=2026&month=03&day=15',
+            'https://www.tennisexplorer.com/results/?type=atp-single&year=2025&month=06&day=10'
+          ]
+          rep=[]
+          for u in urls:
+            try:
+              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36','Accept-Language':'en-US,en;q=0.9'})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                b=r.read(); s=b.decode('utf-8','replace')
+              rep.append({'url':u,'ok':True,'bytes':len(b),'title':re.findall(r'<title>(.*?)</title>',s,re.I|re.S)[:1],'contains_challenger':'challenger' in s.lower(),'decimal_like':re.findall(r'>\s*(\d+\.\d{2})\s*<',s)[:30],'sample':re.sub(r'\s+',' ',s[:3000])})
+            except Exception as e:
+              rep.append({'url':u,'ok':False,'error':repr(e)})
+          Path('reports').mkdir(exist_ok=True)
+          Path('reports/TENNISEXPLORER_PROBE.json').write_text(json.dumps(rep,indent=2))
+          print(json.dumps(rep,indent=2)[:30000])
+          PY
+      - name: Commit probe
+        run: |
+          git config user.name 'ChallengerC1 Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add reports/TENNISEXPLORER_PROBE.json
+          git commit -m 'Probe TennisExplorer public historical Challenger odds' || exit 0
+          git push

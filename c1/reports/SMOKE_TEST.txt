@@ -1,0 +1,1 @@
+ChallengerC1 smoke tests passed

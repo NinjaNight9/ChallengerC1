@@ -1,0 +1,36 @@
+{
+  "model_name": "ChallengerC1",
+  "target_level": "C",
+  "seed": 260904,
+  "rating": {
+    "base": 1500.0,
+    "scale": 400.0,
+    "k_slow": 22.0,
+    "k_fast": 48.0,
+    "k_surface": 34.0,
+    "surface_prior_matches": 8.0,
+    "rank_seed_strength": 0.45
+  },
+  "recent_half_lives_days": [35, 90, 180],
+  "history_days_candidates": [365, 730],
+  "minimum_train_matches": 600,
+  "minimum_test_matches": 80,
+  "validation_block_days": 28,
+  "calibration": "logit",
+  "policy": {
+    "top_fractions": [0.10, 0.15, 0.20, 0.25, 0.30],
+    "edge_floors": [0.02, 0.03, 0.04, 0.05, 0.06, 0.08],
+    "ev_floors": [0.00, 0.02, 0.04],
+    "min_reliability": [0.35, 0.50, 0.65],
+    "max_decimal_odds": [2.75, 3.5, 5.0, 8.0],
+    "price_haircuts": [0.00, 0.03, 0.05, 0.10]
+  },
+  "deployment": {
+    "core_fraction_cap": 0.10,
+    "volume_fraction_cap": 0.20,
+    "minimum_history_matches": 4,
+    "minimum_surface_matches": 2,
+    "minimum_reliability": 0.45,
+    "maximum_decimal_odds": 6.0
+  }
+}

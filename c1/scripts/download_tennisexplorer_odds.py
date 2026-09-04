@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """Backfill public ATP Challenger moneyline odds from TennisExplorer result pages.
 
-The daily results page exposes one row-pair per match and the displayed H/A
-moneyline prices. We retain only tournaments whose name contains 'challenger'.
-Output is deliberately simple so ChallengerC1 can name/date-match it to the
-TennisMyLife results independently.
+The daily historical results page exposes one row-pair per match and the H/A
+moneyline prices shown for that completed match. We retain only men's Challenger
+tournaments. A market-sanity flag is stored because archived web data can
+occasionally contain malformed price pairs; invalid pairs are never allowed into
+C1 value-model training.
 """
 from __future__ import annotations
 
@@ -53,6 +54,16 @@ def _float(text: str):
         return None
 
 
+def price_quality(o1, o2):
+    if o1 is None or o2 is None:
+        return None, False
+    s = 1.0 / o1 + 1.0 / o2
+    # Deliberately broad. Normal two-way tennis books usually sit just above 1;
+    # this only rejects clearly broken archive rows rather than optimizing a
+    # profitability filter after seeing results.
+    return s, bool(0.94 <= s <= 1.20)
+
+
 def parse_day(html: str, day: date) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     out: list[dict] = []
@@ -71,7 +82,6 @@ def parse_day(html: str, day: date) -> list[dict]:
 
             rid = row.get("id", "")
             if rid and not rid.endswith("b") and ("one" in classes or "two" in classes):
-                # We only want men's Challenger events, not Futures/UTR/main tour.
                 if "challenger" not in current_tournament.casefold():
                     i += 1
                     continue
@@ -83,12 +93,9 @@ def parse_day(html: str, day: date) -> list[dict]:
                     if r2.get("id") == rid + "b":
                         p2td = r2.find("td", class_="t-name")
                         p2 = p2td.get_text(" ", strip=True) if p2td else ""
-                # Strip seed markers like '(6)' while preserving initials/names.
                 p1 = re.sub(r"\s*\(\d+\)\s*$", "", p1).strip()
                 p2 = re.sub(r"\s*\(\d+\)\s*$", "", p2).strip()
 
-                # Result-list prices use course/coursew cells; both prices are on
-                # the first row in the current TennisExplorer markup.
                 vals = []
                 for td in row.find_all("td", class_=["course", "coursew"]):
                     v = _float(td.get_text(" ", strip=True))
@@ -96,6 +103,7 @@ def parse_day(html: str, day: date) -> list[dict]:
                         vals.append(v)
                 odd1 = vals[0] if len(vals) >= 1 else None
                 odd2 = vals[1] if len(vals) >= 2 else None
+                implied_sum, valid_price_pair = price_quality(odd1, odd2)
 
                 ttd = row.find("td", class_=lambda c: c and "time" in c.split())
                 tm = ""
@@ -107,16 +115,15 @@ def parse_day(html: str, day: date) -> list[dict]:
 
                 if p1 and p2:
                     out.append({
-                        "date": day.isoformat(),
-                        "time": tm,
+                        "date": day.isoformat(), "time": tm,
                         "tournament": current_tournament,
-                        "player1": p1,
-                        "player2": p2,
-                        "odd1": odd1,
-                        "odd2": odd2,
+                        "player1": p1, "player2": p2,
+                        "odd1": odd1, "odd2": odd2,
+                        "implied_sum": implied_sum,
+                        "valid_price_pair": int(valid_price_pair),
                         "match_url": match_url,
                         "source": "TennisExplorer",
-                        "price_type": "displayed_average_pre_match",
+                        "price_type": "historical_displayed_average",
                     })
                 if i + 1 < len(rows) and rows[i + 1].get("id") == rid + "b":
                     i += 1
@@ -137,7 +144,7 @@ def main():
     end = datetime.strptime(args.end, "%Y-%m-%d").date()
     path = Path(args.out); path.parent.mkdir(parents=True, exist_ok=True)
 
-    fields = ["date","time","tournament","player1","player2","odd1","odd2","match_url","source","price_type"]
+    fields = ["date","time","tournament","player1","player2","odd1","odd2","implied_sum","valid_price_pair","match_url","source","price_type"]
     existing_dates = set()
     if args.resume and path.exists():
         with path.open(newline="", encoding="utf-8") as f:
@@ -146,7 +153,7 @@ def main():
     with path.open(mode, newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         if mode == "w": w.writeheader()
-        total = 0
+        total = valid = 0
         for idx, d in enumerate(daterange(start, end), 1):
             if d.isoformat() in existing_dates:
                 continue
@@ -157,13 +164,14 @@ def main():
                 print(f"WARN {d}: {exc}", flush=True)
                 time.sleep(5)
                 continue
-            for r in rows: w.writerow(r)
-            f.flush()
-            total += len(rows)
+            for r in rows:
+                w.writerow(r)
+                valid += int(r["valid_price_pair"])
+            f.flush(); total += len(rows)
             if idx % 20 == 0 or rows:
-                print(f"{d}: {len(rows)} Challenger matches, total={total}", flush=True)
+                print(f"{d}: {len(rows)} Challenger matches, total={total}, valid_prices={valid}", flush=True)
             time.sleep(random.uniform(args.delay_min, args.delay_max))
-    print(f"DONE {start}..{end}: wrote {path}")
+    print(f"DONE {start}..{end}: total={total}, valid_prices={valid}, wrote {path}")
 
 
 if __name__ == "__main__":

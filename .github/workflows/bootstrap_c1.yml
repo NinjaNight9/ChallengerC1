@@ -1,0 +1,98 @@
+name: Bootstrap ChallengerC1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/**'
+      - '.github/workflows/bootstrap_c1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat bootstrap/part*.b64 > /tmp/c1.b64
+          base64 -d /tmp/c1.b64 > /tmp/ChallengerC1_build.zip
+          unzip -t /tmp/ChallengerC1_build.zip
+          rm -rf /tmp/c1-expanded
+          mkdir -p /tmp/c1-expanded
+          unzip -q /tmp/ChallengerC1_build.zip -d /tmp/c1-expanded
+          test -f /tmp/c1-expanded/challenger_c1/README.md
+          rm -rf c1
+          cp -a /tmp/c1-expanded/challenger_c1 c1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+
+      - name: Run C1 smoke tests
+        working-directory: c1
+        run: PYTHONPATH=src python tests/smoke_test.py
+
+      - name: Download real 2023-2026 TennisMyLife data
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/tennismylife --years 2023 2024 2025 2026
+
+      - name: Audit downloaded data
+        working-directory: c1
+        shell: bash
+        run: |
+          set -euo pipefail
+          find data/raw/tennismylife -type f -maxdepth 3 -print -exec wc -c {} \;
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd, json
+          root=Path('data/raw/tennismylife')
+          out=[]
+          for p in sorted(root.rglob('*.csv')):
+              try:
+                  df=pd.read_csv(p)
+                  out.append({'file':str(p),'rows':len(df),'columns':list(df.columns),'bytes':p.stat().st_size})
+              except Exception as e:
+                  out.append({'file':str(p),'error':repr(e),'bytes':p.stat().st_size})
+          Path('reports/DATA_AUDIT.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2)[:30000])
+          PY
+
+      - name: Save source tree to repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Do not commit downloaded match data; keep the repo light.
+          rm -rf c1/data/raw/tennismylife
+          git config user.name 'ChallengerC1 Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add c1
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+          else
+            git commit -m 'Expand ChallengerC1 source package'
+            git push
+          fi
+
+      - name: Upload data audit and package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenger-c1-bootstrap
+          path: |
+            c1/reports/DATA_AUDIT.json
+            /tmp/ChallengerC1_build.zip
+          if-no-files-found: warn

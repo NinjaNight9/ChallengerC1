@@ -1,0 +1,87 @@
+name: ChallengerC1 Fundamental Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fundamental_benchmark.yml'
+      - 'c1/scripts/fundamental_benchmark.py'
+      - 'c1/scripts/download_tennismylife.py'
+      - 'c1/src/**'
+      - 'c1/config/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+
+      - name: Download 2023-2026 ATP, Challenger, and ATP qualifying history
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/tennismylife --years 2023 2024 2025 2026
+
+      - name: Verify qualifying data is present
+        working-directory: c1
+        shell: bash
+        run: |
+          set -euo pipefail
+          for y in 2023 2024 2025 2026; do
+            test -s "data/raw/tennismylife/${y}.csv"
+            test -s "data/raw/tennismylife/${y}_challenger.csv"
+            test -s "data/raw/tennismylife/atp_quali/${y}_atp_quali.csv"
+          done
+          find data/raw/tennismylife -type f -name '*.csv' -print -exec wc -c {} \;
+
+      - name: Run leakage-safe fundamental benchmark
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/fundamental_benchmark.py \
+            --data-dir data/raw/tennismylife \
+            --years 2023 2024 2025 2026 \
+            --holdout-start 2026-06-01 \
+            --holdout-end 2026-08-31 \
+            --out-dir reports/fundamental_benchmark
+
+      - name: Commit compact benchmark audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ChallengerC1 Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add c1/reports/fundamental_benchmark/FUNDAMENTAL_BENCHMARK_AUDIT.json \
+                  c1/reports/fundamental_benchmark/00_cross_level_source_counts.csv \
+                  c1/reports/fundamental_benchmark/01_horizon_comparison_development.csv \
+                  c1/reports/fundamental_benchmark/05_holdout_base_model_metrics.csv \
+                  c1/reports/fundamental_benchmark/06_holdout_metrics_by_month.csv \
+                  c1/reports/fundamental_benchmark/07_holdout_metrics_by_surface.csv \
+                  c1/reports/fundamental_benchmark/09_holdout_calibration.csv
+          if git diff --cached --quiet; then
+            echo 'No benchmark summary changes.'
+          else
+            git commit -m 'Record ChallengerC1 untouched fundamental benchmark'
+            git push
+          fi
+
+      - name: Upload full benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenger-c1-fundamental-benchmark
+          path: c1/reports/fundamental_benchmark/
+          if-no-files-found: warn

@@ -1,0 +1,112 @@
+name: ChallengerC1 Production Freeze After Value Gate
+
+on:
+  workflow_run:
+    workflows: ["ChallengerC1 Value Evaluation After Odds"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  freeze:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+
+      - name: Download value gate from triggering run
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: challenger-c1-value-evaluation
+          path: value_gate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Check prospective freeze gate
+        id: gate
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          a=json.load(open('value_gate/FINAL_VALUE_EVALUATION_AUDIT.json'))
+          ok=bool(a['core10_approved_for_prospective_tracking'] or a['volume20_approved_for_prospective_tracking'])
+          print('proceed=' + ('true' if ok else 'false'))
+          PY
+
+      - name: Stop cleanly when holdout gate fails
+        if: ${{ steps.gate.outputs.proceed != 'true' }}
+        run: |
+          echo 'Untouched value holdout did not pass the predeclared prospective freeze gate.'
+          echo 'Model is NOT being falsely frozen as profitable. Redesign is required.'
+
+      - name: Download combined valid TennisExplorer odds
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: tennisexplorer-challenger-odds-combined
+          path: odds
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33851807176
+
+      - name: Download 2023-2026 ATP, Challenger, and ATP qualifying history
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/tennismylife --years 2023 2024 2025 2026
+
+      - name: Run full research, untouched holdout grade, and final refit
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/research_freeze_tennisexplorer.py \
+            --data-dir data/raw/tennismylife \
+            --source tennismylife \
+            --years 2023 2024 2025 2026 \
+            --odds ../odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv \
+            --config config/default.json \
+            --holdout-start 2026-06-01 \
+            --holdout-end 2026-08-31 \
+            --out-dir reports/freeze_run
+
+      - name: Upload complete frozen package
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenger-c1-FROZEN-package
+          path: c1/reports/freeze_run/
+          retention-days: 90
+
+      - name: Commit compact freeze audit
+        if: ${{ steps.gate.outputs.proceed == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ChallengerC1 Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add c1/reports/freeze_run/FINAL_RESEARCH_AUDIT.json \
+                  c1/reports/freeze_run/11_frozen_policies.json
+          if git diff --cached --quiet; then
+            echo 'No freeze summary changes.'
+          else
+            git commit -m 'Freeze ChallengerC1 after untouched value holdout gate'
+            git push
+          fi

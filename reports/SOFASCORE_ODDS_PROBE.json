@@ -1,0 +1,21 @@
+{
+  "date": "2026-04-01",
+  "schedule_attempts": [
+    {
+      "url": "https://www.sofascore.com/api/v1/sport/tennis/scheduled-events/2026-04-01",
+      "ok": false,
+      "error": "<HTTPError 403: 'Forbidden'>"
+    },
+    {
+      "url": "https://www.sofascore.com/api/v1/sport/tennis/scheduled-tournaments/2026-04-01/page/0",
+      "ok": false,
+      "error": "<HTTPError 403: 'Forbidden'>"
+    },
+    {
+      "url": "https://www.sofascore.com/api/v1/sport/tennis/scheduled-tournaments/2026-04-01/page/1",
+      "ok": false,
+      "error": "<HTTPError 403: 'Forbidden'>"
+    }
+  ],
+  "challenger_events": []
+}

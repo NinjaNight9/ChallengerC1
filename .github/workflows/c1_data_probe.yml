@@ -1,0 +1,89 @@
+name: C1 Data Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/c1_data_probe.yml'
+      - 'runner/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe public tennis data sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probe
+          python - <<'PY'
+          import json, re, urllib.request
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          class Parser(HTMLParser):
+              def __init__(self):
+                  super().__init__(); self.links=[]; self.scripts=[]
+              def handle_starttag(self, tag, attrs):
+                  d=dict(attrs)
+                  if tag=='a' and d.get('href'): self.links.append(d['href'])
+                  if tag=='script' and d.get('src'): self.scripts.append(d['src'])
+
+          out=Path('probe')
+          urls={
+              'tennisdata_downloads':'https://tennisdata.app/downloads/',
+              'tennismylife_api':'https://stats.tennismylife.org/api/data-files',
+              'sackmann_2026':'https://raw.githubusercontent.com/Kadantte/tennis_atp/master/atp_matches_qual_chall_2026.csv',
+          }
+          summary={}
+          for name,url in urls.items():
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+                  with urllib.request.urlopen(req,timeout=30) as r:
+                      data=r.read()
+                      summary[name]={'status':getattr(r,'status',200),'bytes':len(data),'content_type':r.headers.get('content-type')}
+                      (out/f'{name}.bin').write_bytes(data)
+              except Exception as e:
+                  summary[name]={'error':repr(e)}
+
+          page=(out/'tennisdata_downloads.bin')
+          if page.exists():
+              text=page.read_text(errors='replace')
+              p=Parser(); p.feed(text)
+              summary['tennisdata_links']=p.links
+              summary['tennisdata_scripts']=p.scripts
+              summary['tennisdata_csv_strings']=sorted(set(re.findall(r'[^\"\'<>\s]{0,120}\.csv[^\"\'<>\s]{0,120}',text,re.I)))[:200]
+              summary['tennisdata_api_strings']=sorted(set(re.findall(r'[^\"\'<>\s]{0,120}(?:api|download)[^\"\'<>\s]{0,160}',text,re.I)))[:300]
+              # Fetch same-origin JS bundles and grep them for download/API patterns.
+              from urllib.parse import urljoin
+              bundle_hits=[]
+              for src in p.scripts[:80]:
+                  u=urljoin('https://tennisdata.app/downloads/',src)
+                  try:
+                      req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'})
+                      js=urllib.request.urlopen(req,timeout=20).read().decode('utf-8','replace')
+                      if '.csv' in js.lower() or 'download' in js.lower():
+                          hits=re.findall(r'[^\"\'<>\s]{0,120}(?:\.csv|download|season)[^\"\'<>\s]{0,180}',js,re.I)
+                          bundle_hits.append({'url':u,'hits':hits[:200]})
+                  except Exception as e:
+                      bundle_hits.append({'url':u,'error':repr(e)})
+              summary['bundle_hits']=bundle_hits
+
+          (out/'summary.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2)[:30000])
+          PY
+
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c1-data-probe
+          path: probe/
+          if-no-files-found: warn

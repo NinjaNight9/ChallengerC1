@@ -1,0 +1,39 @@
+name: Probe Book-Specific Challenger Odds
+
+on:
+  push:
+    paths:
+      - '.github/workflows/probe_book_specific_odds.yml'
+      - 'c1/scripts/probe_book_specific_odds.py'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install beautifulsoup4
+      - name: Download combined historical odds
+        run: |
+          mkdir -p external/odds reports
+          gh run download 33851807176 --repo NinjaNight9/ChallengerC1 \
+            --name tennisexplorer-challenger-odds-combined --dir external/odds
+      - name: Probe bookmaker rows
+        run: |
+          python c1/scripts/probe_book_specific_odds.py \
+            --odds external/odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv \
+            --out reports/BOOK_SPECIFIC_PROBE.json --n 8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: book-specific-probe
+          path: reports/BOOK_SPECIFIC_PROBE.json
+          retention-days: 30

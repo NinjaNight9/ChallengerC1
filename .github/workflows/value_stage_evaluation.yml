@@ -1,0 +1,51 @@
+name: ChallengerC1 Value Stage Evaluation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/value_stage_evaluation.yml'
+      - 'c1/scripts/evaluate_value_from_artifacts.py'
+      - 'c1/src/challenger_c1/tennisexplorer_matcher.py'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+      - name: Download completed fundamental and odds artifacts
+        run: |
+          mkdir -p inputs/fund inputs/odds
+          gh run download 33848535511 -n challenger-c1-fundamental-benchmark -D inputs/fund
+          gh run download 33851807176 -n tennisexplorer-challenger-odds-combined -D inputs/odds
+          ls -lah inputs/fund inputs/odds
+      - name: Evaluate C1 VALUE and frozen 10/20 percent policies
+        env:
+          PYTHONPATH: c1/src
+        run: |
+          python c1/scripts/evaluate_value_from_artifacts.py \
+            --fund-dir inputs/fund \
+            --odds inputs/odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv \
+            --out-dir c1/reports/value_stage_evaluation
+      - name: Upload full value-stage evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenger-c1-value-stage-evaluation
+          path: c1/reports/value_stage_evaluation/
+          if-no-files-found: warn
+          retention-days: 90

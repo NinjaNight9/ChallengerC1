@@ -1,0 +1,94 @@
+name: TennisExplorer Full Challenger Odds Backfill
+
+on:
+  push:
+    paths:
+      - '.github/workflows/tennisexplorer_full_odds_backfill.yml'
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - year: 2023
+            start: '2023-01-01'
+            end: '2023-12-31'
+          - year: 2024
+            start: '2024-01-01'
+            end: '2024-12-31'
+          - year: 2025
+            start: '2025-01-01'
+            end: '2025-12-31'
+          - year: 2026
+            start: '2026-01-01'
+            end: '2026-08-31'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install beautifulsoup4
+      - name: Backfill ${{ matrix.year }}
+        run: |
+          mkdir -p odds
+          python c1/scripts/download_tennisexplorer_odds.py \
+            --start '${{ matrix.start }}' --end '${{ matrix.end }}' \
+            --out 'odds/tennisexplorer_challenger_${{ matrix.year }}.csv' \
+            --delay-min 0.65 --delay-max 1.10
+          python - <<'PY'
+          import csv, glob
+          p=glob.glob('odds/*.csv')[0]
+          rows=list(csv.DictReader(open(p,encoding='utf-8')))
+          valid=sum(int(r.get('valid_price_pair') or 0) for r in rows)
+          print({'file':p,'rows':len(rows),'valid_price_pairs':valid,'coverage': valid/len(rows) if rows else 0})
+          assert len(rows) > 500
+          assert valid > 400
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tennisexplorer-odds-${{ matrix.year }}
+          path: odds/*.csv
+          retention-days: 30
+
+  merge:
+    needs: backfill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tennisexplorer-odds-*
+          path: all_odds
+          merge-multiple: true
+      - name: Merge and audit
+        run: |
+          python - <<'PY'
+          import csv, glob, json
+          from pathlib import Path
+          files=sorted(glob.glob('all_odds/*.csv'))
+          rows=[]
+          for p in files: rows += list(csv.DictReader(open(p,encoding='utf-8')))
+          fields=list(rows[0])
+          rows.sort(key=lambda r:(r['date'],r['tournament'],r['player1'],r['player2']))
+          Path('combined').mkdir(exist_ok=True)
+          with open('combined/tennisexplorer_challenger_odds_2023_2026.csv','w',newline='',encoding='utf-8') as f:
+            w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
+          valid=[r for r in rows if r.get('valid_price_pair')=='1']
+          with open('combined/tennisexplorer_challenger_odds_VALID_2023_2026.csv','w',newline='',encoding='utf-8') as f:
+            w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(valid)
+          by_year={}
+          for r in rows:
+            y=r['date'][:4]; d=by_year.setdefault(y,{'rows':0,'valid':0})
+            d['rows']+=1; d['valid']+=int(r.get('valid_price_pair') or 0)
+          audit={'files':files,'total_rows':len(rows),'valid_rows':len(valid),'valid_fraction':len(valid)/len(rows) if rows else 0,'by_year':by_year}
+          Path('combined/ODDS_BACKFILL_AUDIT.json').write_text(json.dumps(audit,indent=2))
+          print(json.dumps(audit,indent=2))
+          assert len(valid) > 10000
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tennisexplorer-challenger-odds-combined
+          path: combined/
+          retention-days: 30

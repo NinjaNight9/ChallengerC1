@@ -1,0 +1,80 @@
+name: ChallengerC1 Finalize Value Model
+
+on:
+  push:
+    paths:
+      - '.github/workflows/finalize_c1.yml'
+      - 'c1/scripts/finalize_from_benchmark.py'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+
+      - name: Download frozen fundamental benchmark artifact
+        run: |
+          mkdir -p external/benchmark
+          gh run download 33848535511 \
+            --repo NinjaNight9/ChallengerC1 \
+            --name challenger-c1-fundamental-benchmark \
+            --dir external/benchmark
+          ls -lh external/benchmark
+
+      - name: Download historical Challenger odds artifact
+        run: |
+          mkdir -p external/odds
+          gh run download 33851807176 \
+            --repo NinjaNight9/ChallengerC1 \
+            --name tennisexplorer-challenger-odds-combined \
+            --dir external/odds
+          ls -lh external/odds
+          test -s external/odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv
+
+      - name: Download fresh 2023-2026 cross-level tennis history
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/tennismylife --years 2023 2024 2025 2026
+
+      - name: Finalize C1 value model and grade untouched holdout
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/finalize_from_benchmark.py \
+            --benchmark-dir ../external/benchmark \
+            --odds ../external/odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv \
+            --data-dir data/raw/tennismylife \
+            --years 2023 2024 2025 2026 \
+            --out-dir reports/final_c1
+
+      - name: Print final audit
+        if: always()
+        run: |
+          if [ -f c1/reports/final_c1/FINAL_RESEARCH_AUDIT.json ]; then
+            cat c1/reports/final_c1/FINAL_RESEARCH_AUDIT.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: challenger-c1-final
+          path: c1/reports/final_c1/
+          if-no-files-found: warn
+          retention-days: 90

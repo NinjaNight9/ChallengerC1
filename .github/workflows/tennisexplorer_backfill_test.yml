@@ -1,0 +1,49 @@
+name: TennisExplorer Challenger Odds Backfill Test
+
+on:
+  push:
+    paths:
+      - 'c1/scripts/download_tennisexplorer_odds.py'
+      - '.github/workflows/tennisexplorer_backfill_test.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install beautifulsoup4
+      - name: Scrape test window
+        run: |
+          mkdir -p reports
+          python c1/scripts/download_tennisexplorer_odds.py \
+            --start 2026-03-10 --end 2026-03-15 \
+            --out reports/TENNISEXPLORER_ODDS_TEST.csv \
+            --delay-min 0.3 --delay-max 0.6
+          echo 'rows:' $(($(wc -l < reports/TENNISEXPLORER_ODDS_TEST.csv)-1))
+          head -30 reports/TENNISEXPLORER_ODDS_TEST.csv
+      - name: Validate known Cap Cana final
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          p='reports/TENNISEXPLORER_ODDS_TEST.csv'
+          df=pd.read_csv(p)
+          print(df[df['tournament'].str.contains('Cap Cana',case=False,na=False)].tail(20).to_string(index=False))
+          assert len(df) >= 20, len(df)
+          cap=df[(df.date=='2026-03-15') & df.tournament.str.contains('Cap Cana',case=False,na=False)]
+          assert len(cap)>=1, cap
+          assert cap[['odd1','odd2']].notna().all(axis=1).any(), cap
+          PY
+      - name: Commit test audit
+        run: |
+          git config user.name 'ChallengerC1 Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add reports/TENNISEXPLORER_ODDS_TEST.csv
+          git commit -m 'Validate TennisExplorer Challenger odds scraper' || exit 0
+          git pull --rebase origin main
+          git push

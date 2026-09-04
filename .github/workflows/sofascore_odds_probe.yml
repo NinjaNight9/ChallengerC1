@@ -1,0 +1,83 @@
+name: Sofascore Challenger Odds Probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/sofascore_odds_probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Probe historical Challenger events and odds
+        run: |
+          python - <<'PY'
+          import json, time, urllib.request
+          from pathlib import Path
+
+          headers={'User-Agent':'Mozilla/5.0'}
+          def get(url):
+              req=urllib.request.Request(url,headers=headers)
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  return json.loads(r.read().decode('utf-8'))
+
+          date='2026-04-01'
+          sched_urls=[
+              f'https://www.sofascore.com/api/v1/sport/tennis/scheduled-events/{date}',
+              f'https://www.sofascore.com/api/v1/sport/tennis/scheduled-tournaments/{date}/page/0',
+              f'https://www.sofascore.com/api/v1/sport/tennis/scheduled-tournaments/{date}/page/1',
+          ]
+          report={'date':date,'schedule_attempts':[],'challenger_events':[]}
+          events=[]
+          for u in sched_urls:
+              try:
+                  data=get(u)
+                  report['schedule_attempts'].append({'url':u,'ok':True,'keys':list(data)[:20]})
+                  if isinstance(data,dict):
+                      if isinstance(data.get('events'),list): events += data['events']
+                      for t in data.get('tournaments',[]) if isinstance(data.get('tournaments'),list) else []:
+                          if isinstance(t,dict) and isinstance(t.get('events'),list): events += t['events']
+              except Exception as e:
+                  report['schedule_attempts'].append({'url':u,'ok':False,'error':repr(e)})
+          seen=set(); out=[]
+          for e in events:
+              eid=e.get('id')
+              if not eid or eid in seen: continue
+              seen.add(eid)
+              t=e.get('tournament') or {}
+              ut=t.get('uniqueTournament') or {}
+              cat=(ut.get('category') or t.get('category') or {})
+              blob=' '.join(str(x) for x in [t.get('name'),ut.get('name'),cat.get('name')]).lower()
+              if 'challenger' not in blob:
+                  continue
+              row={'id':eid,'home':(e.get('homeTeam') or {}).get('name'),'away':(e.get('awayTeam') or {}).get('name'),'tournament':t.get('name'),'uniqueTournament':ut.get('name')}
+              try:
+                  od=get(f'https://www.sofascore.com/api/v1/event/{eid}/odds/1/all')
+                  row['odds_ok']=True
+                  row['odds']=od
+              except Exception as ex:
+                  row['odds_ok']=False; row['odds_error']=repr(ex)
+              out.append(row)
+              if len(out)>=20: break
+              time.sleep(0.15)
+          report['challenger_events']=out
+          Path('reports').mkdir(exist_ok=True)
+          Path('reports/SOFASCORE_ODDS_PROBE.json').write_text(json.dumps(report,indent=2))
+          print(json.dumps(report,indent=2)[:50000])
+          PY
+      - name: Commit probe report
+        run: |
+          git config user.name 'ChallengerC1 Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add reports/SOFASCORE_ODDS_PROBE.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Probe Sofascore historical Challenger odds'
+            git push
+          fi

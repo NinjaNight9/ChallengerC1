@@ -4,6 +4,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -29,12 +30,7 @@ def _tokens(value: object) -> list[str]:
 
 
 def _split_te_name(value: object) -> tuple[list[str], list[str]]:
-    """Split TennisExplorer's usual `Surname I.` representation.
-
-    Multiple surname tokens and multiple initials are both supported, e.g.
-    `Reis Da Silva J.L.`. Some players have a first-name discrepancy across
-    feeds; surname identity therefore carries most of the matching weight.
-    """
+    """Split TennisExplorer's usual `Surname I.` representation."""
     toks = _tokens(value)
     if not toks:
         return [], []
@@ -70,6 +66,7 @@ def _subseq_ratio(short_tokens: list[str], full_tokens: list[str]) -> float:
     return max(exact, float(np.mean(fuzzy)))
 
 
+@lru_cache(maxsize=250000)
 def player_similarity(full_name: object, te_name: object) -> float:
     full_norm, te_norm = normalize_name(full_name), normalize_name(te_name)
     if not full_norm or not te_norm:
@@ -102,6 +99,7 @@ def _pair_orientation_score(a: object, b: object, p1: object, p2: object):
     return (direct, "direct", swapped) if direct >= swapped else (swapped, "swapped", direct)
 
 
+@lru_cache(maxsize=10000)
 def _tournament_similarity(a: object, b: object) -> float:
     aa = normalize_name(a).replace(" challenger", "").strip()
     bb = normalize_name(b).replace(" challenger", "").strip()
@@ -119,13 +117,11 @@ def attach_tennisexplorer_odds(
     min_pair_score: float = 0.78,
     ambiguity_margin: float = 0.035,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Attach TennisExplorer historical odds without looking at match outcomes.
+    """Attach historical TennisExplorer odds without using outcomes.
 
-    The fundamental source stores full names and an event/proxy date, while
-    TennisExplorer commonly stores `Surname Initials` and the actual match date.
-    Matching uses surname anchors first, then a date-window fallback. Full-name
-    pair score dominates; tournament/date only resolve close candidates. Low
-    score or ambiguous matches are dropped rather than guessed.
+    Full-name fundamental rows are joined to TennisExplorer's abbreviated names
+    by surname anchors and initials, with tournament/date used only as tie
+    breakers. Ambiguous or low-confidence joins are dropped rather than guessed.
     """
     f = features.copy().reset_index(drop=False).rename(columns={"index": "_feature_index"})
     o = odds.copy().reset_index(drop=False).rename(columns={"index": "_odds_index"})
@@ -139,32 +135,46 @@ def attach_tennisexplorer_odds(
     o["_date"] = pd.to_datetime(o["date"], errors="coerce").dt.normalize()
     o = o.dropna(subset=["_date"]).copy()
 
-    # Fundamental `date` is the event date; proxy_date is a much better estimate
-    # of the actual round date and is still strictly pre-result metadata.
     fdate = f["proxy_date"] if "proxy_date" in f.columns else f["date"]
     f["_date"] = pd.to_datetime(fdate, errors="coerce").dt.normalize()
 
-    o["_anchor"] = [
-        "||".join(sorted((_anchor_te(a), _anchor_te(b))))
-        for a, b in zip(o["player1"], o["player2"])
-    ]
+    o["_anchor1"] = [_anchor_te(a) for a in o["player1"]]
+    o["_anchor2"] = [_anchor_te(b) for b in o["player2"]]
+    o["_anchor"] = ["||".join(sorted((a, b))) for a, b in zip(o["_anchor1"], o["_anchor2"])]
     by_anchor = {k: g for k, g in o.groupby("_anchor", sort=False)}
+    by_player: dict[str, list[int]] = defaultdict(list)
     by_date: dict[pd.Timestamp, list[int]] = defaultdict(list)
-    for idx, d in zip(o.index, o["_date"]):
-        by_date[d].append(idx)
+    for idx, day, a1, a2 in zip(o.index, o["_date"], o["_anchor1"], o["_anchor2"]):
+        by_date[day].append(idx)
+        if a1:
+            by_player[a1].append(idx)
+        if a2 and a2 != a1:
+            by_player[a2].append(idx)
 
     selected: list[dict] = []
     audit: list[dict] = []
     for _, row in f.iterrows():
-        anchor = "||".join(sorted((_anchor_full(row["player_a"]), _anchor_full(row["player_b"]))))
-        candidates = by_anchor.get(anchor)
-        candidate_source = "anchor"
+        a_anchor = _anchor_full(row["player_a"])
+        b_anchor = _anchor_full(row["player_b"])
+        pair_anchor = "||".join(sorted((a_anchor, b_anchor)))
+        candidates = by_anchor.get(pair_anchor)
+        candidate_source = "pair_anchor"
         if candidates is not None and not candidates.empty:
             c = candidates.copy()
             c["date_gap"] = (c["_date"] - row["_date"]).dt.days.abs()
             c = c[c["date_gap"] <= max_date_gap_days].copy()
         else:
             c = pd.DataFrame()
+
+        # Compound-surname disagreement can break the exact pair anchor. Reuse
+        # the agreeing player's surname before considering all matches by date.
+        if c.empty:
+            indices = set(by_player.get(a_anchor, [])) | set(by_player.get(b_anchor, []))
+            c = o.loc[sorted(indices)].copy() if indices else pd.DataFrame()
+            candidate_source = "single_anchor"
+            if not c.empty:
+                c["date_gap"] = (c["_date"] - row["_date"]).dt.days.abs()
+                c = c[c["date_gap"] <= max_date_gap_days].copy()
 
         if c.empty:
             indices: list[int] = []
@@ -175,6 +185,13 @@ def attach_tennisexplorer_odds(
             candidate_source = "date_fallback"
             if not c.empty:
                 c["date_gap"] = (c["_date"] - row["_date"]).dt.days.abs()
+                if "tournament" in c.columns:
+                    ts = c["tournament"].map(
+                        lambda x: _tournament_similarity(str(row.get("tourney_name", "")), str(x))
+                    )
+                    keep = ts >= 0.45
+                    if keep.any():
+                        c = c[keep].copy()
 
         if c.empty:
             audit.append({
@@ -188,7 +205,9 @@ def attach_tennisexplorer_odds(
             pair_score, orientation, opposite = _pair_orientation_score(
                 row["player_a"], row["player_b"], cand["player1"], cand["player2"]
             )
-            tourney_sim = _tournament_similarity(row.get("tourney_name", ""), cand.get("tournament", ""))
+            tourney_sim = _tournament_similarity(
+                str(row.get("tourney_name", "")), str(cand.get("tournament", ""))
+            )
             date_gap = float(cand["date_gap"])
             total = (
                 0.82 * pair_score

@@ -1,0 +1,96 @@
+name: Challenger Book-Specific Odds Backfill
+
+on:
+  push:
+    paths:
+      - '.github/workflows/book_specific_backfill.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  backfill:
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2024, 2025, 2026]
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install beautifulsoup4
+      - name: Download result-page historical odds
+        run: |
+          mkdir -p external/odds books
+          gh run download 33851807176 --repo NinjaNight9/ChallengerC1 \
+            --name tennisexplorer-challenger-odds-combined --dir external/odds
+      - name: Backfill bookmaker prices for ${{ matrix.year }}
+        run: |
+          python c1/scripts/backfill_book_specific_odds.py \
+            --odds external/odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv \
+            --year ${{ matrix.year }} \
+            --out books/challenger_books_${{ matrix.year }}.csv \
+            --delay-min 0.35 --delay-max 0.60
+          python - <<'PY'
+          import csv,glob
+          p=glob.glob('books/*.csv')[0]
+          rows=list(csv.DictReader(open(p,encoding='utf-8')))
+          def ok(r,prefix):
+              try:return float(r.get(prefix+'_close1') or 0)>1 and float(r.get(prefix+'_close2') or 0)>1
+              except:return False
+          pin=sum(ok(r,'pinnacle') for r in rows); b365=sum(ok(r,'bet365') for r in rows); both=sum(ok(r,'pinnacle') and ok(r,'bet365') for r in rows)
+          print({'rows':len(rows),'pinnacle':pin,'bet365':b365,'both':both,'both_fraction':both/len(rows) if rows else 0})
+          assert len(rows)>5000
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: challenger-books-${{ matrix.year }}
+          path: books/*.csv
+          retention-days: 90
+
+  merge:
+    needs: backfill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: challenger-books-*
+          path: all_books
+          merge-multiple: true
+      - name: Merge and coverage audit
+        run: |
+          mkdir -p combined
+          python - <<'PY'
+          import csv,glob,json
+          files=sorted(glob.glob('all_books/*.csv')); rows=[]
+          for p in files: rows += list(csv.DictReader(open(p,encoding='utf-8')))
+          rows.sort(key=lambda r:(r.get('date',''),r.get('match_url','')))
+          fields=list(rows[0])
+          with open('combined/challenger_book_specific_2024_2026.csv','w',newline='',encoding='utf-8') as f:
+              w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
+          def ok(r,prefix):
+              try:return float(r.get(prefix+'_close1') or 0)>1 and float(r.get(prefix+'_close2') or 0)>1
+              except:return False
+          audit={'rows':len(rows),'years':{}}
+          for y in ['2024','2025','2026']:
+              z=[r for r in rows if r.get('date','').startswith(y)]
+              pin=sum(ok(r,'pinnacle') for r in z); b365=sum(ok(r,'bet365') for r in z); both=sum(ok(r,'pinnacle') and ok(r,'bet365') for r in z)
+              audit['years'][y]={'rows':len(z),'pinnacle':pin,'bet365':b365,'both':both,'both_fraction':both/len(z) if z else 0}
+          audit['pinnacle_total']=sum(ok(r,'pinnacle') for r in rows)
+          audit['bet365_total']=sum(ok(r,'bet365') for r in rows)
+          audit['both_total']=sum(ok(r,'pinnacle') and ok(r,'bet365') for r in rows)
+          open('combined/BOOK_SPECIFIC_AUDIT.json','w').write(json.dumps(audit,indent=2))
+          print(json.dumps(audit,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: challenger-books-combined
+          path: combined/
+          retention-days: 90

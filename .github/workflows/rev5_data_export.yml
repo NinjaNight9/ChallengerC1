@@ -1,0 +1,40 @@
+name: ChallengerC1 Rev5 Data Export
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rev5_data_export.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download fresh 2023-2026 TennisMyLife history
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/rev5_export --years 2023 2024 2025 2026
+      - name: Verify source files
+        working-directory: c1
+        shell: bash
+        run: |
+          set -euo pipefail
+          for y in 2023 2024 2025 2026; do
+            test -s "data/raw/rev5_export/${y}.csv"
+            test -s "data/raw/rev5_export/${y}_challenger.csv"
+            test -s "data/raw/rev5_export/atp_quali/${y}_atp_quali.csv"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: challenger-c1-rev5-fresh-tml-data
+          path: c1/data/raw/rev5_export/
+          if-no-files-found: error
+          retention-days: 7

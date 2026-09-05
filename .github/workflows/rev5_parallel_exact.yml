@@ -1,0 +1,116 @@
+name: ChallengerC1 Rev5 Exact Parallel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rev5_parallel_exact.yml'
+      - 'c1/scripts/rev5_parallel_exact.py'
+      - 'c1/scripts/rev5_exact_feature_patch.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  horizon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        horizon: [365, 730]
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      LOKY_MAX_CPU_COUNT: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+      - name: Download fresh TML history
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/rev5_parallel_tml --years 2023 2024 2025 2026
+      - name: Evaluate one frozen history horizon
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/rev5_parallel_exact.py \
+            --mode horizon \
+            --data-dir data/raw/rev5_parallel_tml \
+            --years 2023 2024 2025 2026 \
+            --holdout-start 2026-06-01 \
+            --holdout-end 2026-08-30 \
+            --horizon ${{ matrix.horizon }} \
+            --out-dir reports/rev5_parallel/${{ matrix.horizon }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rev5-horizon-${{ matrix.horizon }}
+          path: c1/reports/rev5_parallel/${{ matrix.horizon }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+  finalize:
+    needs: horizon
+    if: ${{ needs.horizon.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      LOKY_MAX_CPU_COUNT: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+      - name: Download frozen horizon artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rev5-horizon-*
+          path: c1/reports/rev5_parallel/incoming
+          merge-multiple: true
+      - name: Download fresh TML history
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/rev5_parallel_tml --years 2023 2024 2025 2026
+      - name: Select development winner once and grade untouched holdout
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/rev5_parallel_exact.py \
+            --mode finalize \
+            --data-dir data/raw/rev5_parallel_tml \
+            --years 2023 2024 2025 2026 \
+            --holdout-start 2026-06-01 \
+            --holdout-end 2026-08-30 \
+            --horizon-dir reports/rev5_parallel/incoming \
+            --out-dir reports/rev5_parallel/final
+      - name: Print final audit
+        if: always()
+        run: |
+          if [ -f c1/reports/rev5_parallel/final/FUNDAMENTAL_FREEZE_AUDIT.json ]; then
+            cat c1/reports/rev5_parallel/final/FUNDAMENTAL_FREEZE_AUDIT.json
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: challenger-c1-rev5-parallel-final
+          path: c1/reports/rev5_parallel/final/
+          if-no-files-found: warn
+          retention-days: 90

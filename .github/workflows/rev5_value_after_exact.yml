@@ -1,0 +1,129 @@
+name: ChallengerC1 Rev5 Value Sensitivity After Exact FUND
+
+on:
+  workflow_run:
+    workflows: ["ChallengerC1 Rev5 Exact Parallel"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      fund_run_id:
+        description: "Successful ChallengerC1 Rev5 Exact Parallel run id"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  value-sensitivity:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      LOKY_MAX_CPU_COUNT: '2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+
+      - name: Resolve exact FUND run id
+        id: fundrun
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "id=${{ inputs.fund_run_id }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download exact frozen Rev5 FUND artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: challenger-c1-rev5-parallel-final
+          path: fundamental
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.fundrun.outputs.id }}
+
+      - name: Download historical TennisExplorer odds sensitivity artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tennisexplorer-challenger-odds-combined
+          path: odds
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: 33851807176
+
+      - name: Validate required inputs and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s fundamental/FUNDAMENTAL_FREEZE_AUDIT.json
+          test -s fundamental/04_UNTOUCHED_holdout_predictions.csv
+          test -s odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv
+          python - <<'PY'
+          import json, pandas as pd
+          a=json.load(open('fundamental/FUNDAMENTAL_FREEZE_AUDIT.json'))
+          assert a.get('revision') == 'Rev5', a
+          assert a.get('holdout_start') == '2026-06-01', a
+          assert a.get('holdout_end') == '2026-08-30', a
+          assert a.get('results_provenance',{}).get('terminal_tournament_week') == '2026-08-24', a
+          assert a.get('results_provenance',{}).get('terminal_week_events_without_final') == 0, a
+          o=pd.read_csv('odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv', low_memory=False)
+          assert len(o) >= 30000, len(o)
+          if 'price_type' in o:
+              assert set(o['price_type'].dropna().astype(str)) == {'historical_displayed_average'}
+          print('Validated Rev5 FUND + non-prestart TennisExplorer sensitivity provenance')
+          PY
+
+      - name: Run frozen C1-VALUE and CORE10 sensitivity evaluation
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/rev5_value_sensitivity.py \
+            --fund-dir ../fundamental \
+            --odds ../odds/tennisexplorer_challenger_odds_VALID_2023_2026.csv \
+            --config config/default.json \
+            --out-dir reports/rev5_value_sensitivity
+
+      - name: Verify policy cannot be approval-grade
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          p='c1/reports/rev5_value_sensitivity/FINAL_VALUE_EVALUATION.json'
+          a=json.load(open(p))
+          assert a['betting_policy_approved'] is False
+          assert a['evaluation_grade'] == 'NON_APPROVAL_GRADE_SENSITIVITY'
+          assert a['immutable_prestart_quote_provenance'] is False
+          print(json.dumps({
+            'selected_history_days': a.get('selected_history_days'),
+            'development_matching': a.get('development_matching'),
+            'holdout_matching': a.get('holdout_matching'),
+            'core_policy': a.get('core_policy'),
+            'core_holdout': a.get('core_holdout'),
+            'core_holdout_5pct_price_haircut': a.get('core_holdout_5pct_price_haircut'),
+            'volume20_holdout': a.get('volume20_holdout'),
+            'evaluation_grade': a.get('evaluation_grade'),
+            'betting_policy_approved': a.get('betting_policy_approved'),
+          }, indent=2, default=str))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: challenger-c1-rev5-value-sensitivity
+          path: c1/reports/rev5_value_sensitivity/
+          if-no-files-found: warn
+          retention-days: 90

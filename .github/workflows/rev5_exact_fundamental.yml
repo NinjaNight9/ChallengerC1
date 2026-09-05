@@ -1,0 +1,81 @@
+name: ChallengerC1 Rev5 Exact Fundamental
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rev5_exact_fundamental.yml'
+      - 'c1/scripts/rev5_exact_feature_patch.py'
+      - 'c1/scripts/rev5_final_fundamental.py'
+      - 'c1/scripts/download_tennismylife.py'
+      - 'c1/src/challenger_c1/model.py'
+      - 'c1/src/challenger_c1/features.py'
+      - 'c1/config/default.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rev5-exact-fundamental:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      LOKY_MAX_CPU_COUNT: '2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: c1/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r c1/requirements.txt
+
+      - name: Download fresh 2023-2026 TennisMyLife history
+        working-directory: c1
+        run: python scripts/download_tennismylife.py --out data/raw/rev5_exact_tml --years 2023 2024 2025 2026
+
+      - name: Verify required source files
+        working-directory: c1
+        shell: bash
+        run: |
+          set -euo pipefail
+          for y in 2023 2024 2025 2026; do
+            test -s "data/raw/rev5_exact_tml/${y}.csv"
+            test -s "data/raw/rev5_exact_tml/${y}_challenger.csv"
+            test -s "data/raw/rev5_exact_tml/atp_quali/${y}_atp_quali.csv"
+          done
+
+      - name: Run exact Rev5 leakage-safe 365-vs-730 and untouched holdout
+        working-directory: c1
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/rev5_exact_feature_patch.py \
+            --data-dir data/raw/rev5_exact_tml \
+            --years 2023 2024 2025 2026 \
+            --holdout-start 2026-06-01 \
+            --holdout-end 2026-08-30 \
+            --out-dir reports/rev5_exact_fundamental
+
+      - name: Print exact Rev5 audit
+        if: always()
+        run: |
+          if [ -f c1/reports/rev5_exact_fundamental/FUNDAMENTAL_FREEZE_AUDIT.json ]; then
+            cat c1/reports/rev5_exact_fundamental/FUNDAMENTAL_FREEZE_AUDIT.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: challenger-c1-rev5-exact-fundamental
+          path: c1/reports/rev5_exact_fundamental/
+          if-no-files-found: warn
+          retention-days: 90

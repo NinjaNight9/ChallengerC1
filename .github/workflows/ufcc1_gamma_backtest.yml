@@ -1,0 +1,36 @@
+name: UFCC1 gamma historical backtest
+on:
+  push:
+    branches: [ufcc1-backtest-live]
+    paths:
+      - 'ufcc1_remote/gamma_benchmark.py'
+      - '.github/workflows/ufcc1_gamma_backtest.yml'
+      - 'ufcc1_remote/TRIGGER'
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check pandas numpy scipy scikit-learn
+      - name: Download frozen public UFC historical source
+        run: |
+          curl -L --fail --retry 3 -o ultimate_ufc_dataset.csv https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2026/2026-07-07/ultimate_ufc_dataset.csv
+          wc -l ultimate_ufc_dataset.csv
+          sha256sum ultimate_ufc_dataset.csv | tee dataset_sha256.txt
+      - name: Run preregistered gamma diagnostic
+        run: |
+          mkdir -p gamma_out
+          python ufcc1_remote/gamma_benchmark.py ultimate_ufc_dataset.csv gamma_out | tee gamma_out/stdout.txt
+          cp dataset_sha256.txt gamma_out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ufcc1-gamma-results
+          path: gamma_out/
+          if-no-files-found: error

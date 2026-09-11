@@ -34,3 +34,8 @@ jobs:
           name: ufcc1-gamma-results
           path: gamma_out/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ultimate-ufc-dataset
+          path: ultimate_ufc_dataset.csv
+          if-no-files-found: error

@@ -1,0 +1,61 @@
+name: UFCC1 remote backtest
+
+on:
+  push:
+    branches:
+      - ufcc1-remote-backtest
+    paths:
+      - 'ufcc1_remote/UFCC1_RUN_READY'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct frozen lab
+        run: |
+          cat ufcc1_remote/lab.part* > ufcc1_remote/UFCC1_lab.zip.b64
+          base64 -d ufcc1_remote/UFCC1_lab.zip.b64 > UFCC1_lab.zip
+          sha256sum UFCC1_lab.zip
+          unzip -q UFCC1_lab.zip
+      - name: Download frozen public UFC history
+        run: |
+          curl -L --fail --retry 3 'https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2026/2026-07-07/ultimate_ufc_dataset.csv' -o ultimate_ufc_dataset.csv
+          wc -l ultimate_ufc_dataset.csv
+          sha256sum ultimate_ufc_dataset.csv
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r UFCC1_lab/alpha/requirements.txt
+      - name: Verify frozen tests
+        run: |
+          python -m pytest -q UFCC1_lab/alpha/tests
+          python -m pytest -q UFCC1_lab/beta/tests
+      - name: Run matched chronological backtest
+        run: |
+          python UFCC1_lab/compare_branches.py ultimate_ufc_dataset.csv --outdir historical_compare
+      - name: Package results
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          files = {}
+          for p in sorted(Path('historical_compare').rglob('*')) if Path('historical_compare').exists() else []:
+              if p.is_file():
+                  files[str(p)] = hashlib.sha256(p.read_bytes()).hexdigest()
+          Path('run_manifest.json').write_text(json.dumps(files, indent=2))
+          PY
+          zip -qr UFCC1_historical_compare.zip historical_compare run_manifest.json ultimate_ufc_dataset.csv || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: UFCC1-historical-compare
+          path: |
+            UFCC1_historical_compare.zip
+            run_manifest.json
+          if-no-files-found: warn
